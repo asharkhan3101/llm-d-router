@@ -35,6 +35,7 @@ import (
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	approxprefixconstants "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/approximateprefix/constants"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/prefixhash"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/prefixmetrics"
 	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 )
 
@@ -159,6 +160,7 @@ func newDataProducer(ctx context.Context, name string, config config, handle plu
 	if err := registerMetrics(handle.Metrics()); err != nil {
 		return nil, err
 	}
+	prefixmetrics.Register()
 	// Surface the override to the operator so a too-small configured value is
 	// not silently swallowed. The clamp itself happens at request time in
 	// GetBlockSize and applies uniformly across endpoint metric, autotune
@@ -298,6 +300,7 @@ func (p *dataProducer) PreRequest(ctx context.Context, request *fwksched.Inferen
 	blockSize := p.GetBlockSize(primaryProfileResult.TargetEndpoints)
 	const averageCharactersPerToken = 4
 	recordPrefixCacheMatch(p.typedName.Name, p.typedName.Type, matchLen*blockSize*averageCharactersPerToken, total*blockSize*averageCharactersPerToken)
+	prefixmetrics.RecordPredictedCachedTokens(p.typedName.Name, p.typedName.Type, matchLen*blockSize)
 	return nil
 }
 

@@ -164,6 +164,21 @@ when the producer is created; observations require prefix lookups.
 | `llm_d_epp_prefix_indexer_hit_ratio` | Histogram | `plugin_name`, `plugin_type` | Prefix-match hit ratio. |
 | `llm_d_epp_prefix_indexer_hit_bytes` | Histogram | `plugin_name`, `plugin_type` | Bytes matched per lookup. |
 
+### Prefix cache prediction
+
+Every prefix-aware data producer emits this metric, labelled by the producer that observed it.
+It counts prompt tokens for the endpoint the scheduler chose, so its `_sum` over
+`llm_d_epp_request_input_tokens_sum` is the prefix hit rate the router predicted and the same ratio
+over `llm_d_epp_request_cached_tokens_sum` is the rate the model server delivered. Requests that
+reach no endpoint are not observed.
+
+`llm_d_epp_kv_cache_index_lookup_hits_total` answers a different question: it counts the best
+candidate rather than the chosen one, which bounds the reuse available to any routing decision.
+
+| Full metric name | Type | Labels | Notes |
+|---|---|---|---|
+| `llm_d_epp_prefix_predicted_cached_tokens` | Histogram | `plugin_name`, `plugin_type` | Prompt tokens predicted to hit the chosen endpoint's prefix cache. |
+
 ### Multimodal encoder cache
 
 These metrics belong to the `mm-embeddings-cache-producer`, not Flow Control. The producer keeps an

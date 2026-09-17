@@ -23,11 +23,15 @@ import (
 
 	"github.com/jellydator/ttlcache/v3"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/prefixmetrics"
 	"github.com/llm-d/llm-d-router/test/utils"
 )
 
@@ -38,12 +42,17 @@ type addCall struct {
 }
 
 func newProducerForPreRequest(ctx context.Context, speculativeEnabled bool, idx *fakeKVBlockIndex) *Producer {
+	return newNamedProducerForPreRequest(ctx, "test", speculativeEnabled, idx)
+}
+
+func newNamedProducerForPreRequest(ctx context.Context, name string, speculativeEnabled bool, idx *fakeKVBlockIndex) *Producer {
 	cache := ttlcache.New[string, *speculativeEntries](
 		ttlcache.WithTTL[string, *speculativeEntries](time.Minute),
 	)
 	return &Producer{
-		typedName:          plugin.TypedName{Type: PluginType, Name: "test"},
+		typedName:          plugin.TypedName{Type: PluginType, Name: name},
 		kvCacheIndexer:     &fakeKVCacheIndexer{index: idx},
+		dk:                 attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(name),
 		speculativeCache:   cache,
 		speculativeTTL:     time.Minute,
 		speculativeEnabled: speculativeEnabled,
@@ -172,4 +181,89 @@ func TestPreRequest_SpeculativeDisabled_NoOp(t *testing.T) {
 	_ = p.PreRequest(ctx, req, primaryOnly("default", testEndpoints[0]))
 
 	assert.Nil(t, p.speculativeCache.Get(req.RequestID))
+}
+
+// The predicted token count comes from the chosen endpoint's unweighted cached
+// block count, not the tier-weighted match score, and is reported with
+// speculative indexing off.
+func TestPreRequest_RecordsPredictedCachedTokens(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	prefixmetrics.Register()
+
+	const name = "precise-predicted-records"
+	p := newNamedProducerForPreRequest(ctx, name, false, &fakeKVBlockIndex{})
+
+	endpoint := freshEndpoints()[0]
+	// Weighted score 2.5 against 4 cached blocks: the token count must follow
+	// the cached count.
+	endpoint.Put(p.dk, attrprefix.NewPrefixCacheMatchInfo(2, 8, testBlockSize).
+		WithCachedBlockCount(4))
+
+	before := predictedCachedTokensSum(t, name)
+	_ = p.PreRequest(ctx, &scheduling.InferenceRequest{RequestID: "req-predicted"},
+		primaryOnly("default", endpoint))
+
+	assert.Equal(t, before+float64(4*testBlockSize), predictedCachedTokensSum(t, name))
+}
+
+// An endpoint the producer never published match info for is not observed:
+// a zero would be indistinguishable from a real zero-hit prediction.
+func TestPreRequest_NoMatchInfo_RecordsNothing(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	prefixmetrics.Register()
+
+	const name = "precise-predicted-absent"
+	p := newNamedProducerForPreRequest(ctx, name, false, &fakeKVBlockIndex{})
+
+	before := predictedCachedTokensCount(t, name)
+	_ = p.PreRequest(ctx, &scheduling.InferenceRequest{RequestID: "req-no-info"},
+		primaryOnly("default", freshEndpoints()[0]))
+	assert.Equal(t, before, predictedCachedTokensCount(t, name))
+
+	// No endpoint at all is equally a no-op.
+	_ = p.PreRequest(ctx, &scheduling.InferenceRequest{RequestID: "req-no-endpoint"},
+		&scheduling.SchedulingResult{
+			PrimaryProfileName: "default",
+			ProfileResults:     map[string]*scheduling.ProfileRunResult{"default": {}},
+		})
+	assert.Equal(t, before, predictedCachedTokensCount(t, name))
+}
+
+func predictedCachedTokensSum(t *testing.T, pluginName string) float64 {
+	t.Helper()
+	histogram := predictedCachedTokensHistogram(t, pluginName)
+	if histogram == nil {
+		return 0
+	}
+	return histogram.GetSampleSum()
+}
+
+func predictedCachedTokensCount(t *testing.T, pluginName string) uint64 {
+	t.Helper()
+	histogram := predictedCachedTokensHistogram(t, pluginName)
+	if histogram == nil {
+		return 0
+	}
+	return histogram.GetSampleCount()
+}
+
+// predictedCachedTokensHistogram reads the shared prefix metric out of the
+// registry it is registered against, since the metric lives in another package.
+func predictedCachedTokensHistogram(t *testing.T, pluginName string) *dto.Histogram {
+	t.Helper()
+	families, err := ctrlmetrics.Registry.Gather()
+	require.NoError(t, err)
+	for _, family := range families {
+		if family.GetName() != "llm_d_epp_prefix_predicted_cached_tokens" {
+			continue
+		}
+		for _, metric := range family.GetMetric() {
+			for _, label := range metric.GetLabel() {
+				if label.GetName() == "plugin_name" && label.GetValue() == pluginName {
+					return metric.GetHistogram()
+				}
+			}
+		}
+	}
+	return nil
 }
