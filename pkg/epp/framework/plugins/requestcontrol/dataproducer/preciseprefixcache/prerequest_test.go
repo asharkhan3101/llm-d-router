@@ -199,9 +199,10 @@ func TestPreRequest_RecordsPredictedCachedTokens(t *testing.T) {
 	endpoint.Put(p.dk, attrprefix.NewPrefixCacheMatchInfo(2, 8, testBlockSize).
 		WithCachedBlockCount(4))
 
+	// A non-default profile name proves the lookup follows PrimaryProfileName.
 	before := predictedCachedTokensSum(t, name)
 	_ = p.PreRequest(ctx, &scheduling.InferenceRequest{RequestID: "req-predicted"},
-		primaryOnly("default", endpoint))
+		primaryOnly("decode", endpoint))
 
 	assert.Equal(t, before+float64(4*testBlockSize), predictedCachedTokensSum(t, name))
 }
