@@ -33,22 +33,32 @@ func TestRegisterIsIdempotent(t *testing.T) {
 	})
 }
 
-// A zero prediction is a real observation: the router expected no cache hit.
-func TestRecordPredictedCachedTokens(t *testing.T) {
+// A zero prediction is a real observation: the router expected no cache hit,
+// and the request still contributes its prompt tokens to the denominator.
+func TestRecordPrediction(t *testing.T) {
 	predictedCachedTokens.Reset()
-	t.Cleanup(predictedCachedTokens.Reset)
+	promptTokens.Reset()
+	t.Cleanup(func() {
+		predictedCachedTokens.Reset()
+		promptTokens.Reset()
+	})
 
-	RecordPredictedCachedTokens("test-plugin", "test-type", 512)
-	RecordPredictedCachedTokens("test-plugin", "test-type", 0)
+	RecordPrediction("test-plugin", "test-type", 512, 1024)
+	RecordPrediction("test-plugin", "test-type", 0, 256)
 
-	got, err := predictedHistogram("test-plugin", "test-type")
+	predicted, err := histogramFor(predictedCachedTokens, "test-plugin", "test-type")
 	require.NoError(t, err)
-	assert.Equal(t, uint64(2), got.GetSampleCount())
-	assert.Equal(t, float64(512), got.GetSampleSum())
+	assert.Equal(t, uint64(2), predicted.GetSampleCount())
+	assert.Equal(t, float64(512), predicted.GetSampleSum())
+
+	prompt, err := histogramFor(promptTokens, "test-plugin", "test-type")
+	require.NoError(t, err)
+	assert.Equal(t, uint64(2), prompt.GetSampleCount())
+	assert.Equal(t, float64(1280), prompt.GetSampleSum())
 }
 
-func predictedHistogram(labelValues ...string) (*dto.Histogram, error) {
-	observer, err := predictedCachedTokens.GetMetricWithLabelValues(labelValues...)
+func histogramFor(vec *prometheus.HistogramVec, labelValues ...string) (*dto.Histogram, error) {
+	observer, err := vec.GetMetricWithLabelValues(labelValues...)
 	if err != nil {
 		return nil, err
 	}

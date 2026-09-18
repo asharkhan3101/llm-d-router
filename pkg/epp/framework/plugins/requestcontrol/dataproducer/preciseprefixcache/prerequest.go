@@ -66,12 +66,14 @@ func (s *blockKeysState) Clone() plugin.StateData {
 	return &blockKeysState{perPromptKeys: cp}
 }
 
-// recordPredictedCachedTokens reports the prompt tokens the index expects the
-// scheduler's chosen endpoint to serve from its prefix cache. It reads the
-// unweighted cached-block count rather than the tier-weighted match score, so a
-// RAM-tier hit contributes its full token count, and it counts speculative
-// entries because those are part of what the router acted on.
-func (p *Producer) recordPredictedCachedTokens(schedulingResult *scheduling.SchedulingResult) {
+// recordPrediction reports the prompt tokens the index expects the scheduler's
+// chosen endpoint to serve from its prefix cache. It reads the unweighted
+// cached-block count rather than the tier-weighted match score, so a RAM-tier
+// hit contributes its full token count, and it counts speculative entries
+// because those are part of what the router acted on. The token processor drops
+// a prompt's trailing partial block, so the block-to-token conversion cannot
+// exceed the prompt length.
+func (p *Producer) recordPrediction(request *scheduling.InferenceRequest, schedulingResult *scheduling.SchedulingResult) {
 	if schedulingResult == nil || schedulingResult.ProfileResults == nil {
 		return
 	}
@@ -87,8 +89,11 @@ func (p *Producer) recordPredictedCachedTokens(schedulingResult *scheduling.Sche
 	if !ok {
 		return
 	}
-	prefixmetrics.RecordPredictedCachedTokens(p.typedName.Name, p.typedName.Type,
-		info.CachedBlockCount()*info.BlockSizeTokens())
+	if request == nil || request.Body == nil || request.Body.TokenizedRequest == nil {
+		return
+	}
+	prefixmetrics.RecordPrediction(p.typedName.Name, p.typedName.Type,
+		info.CachedBlockCount()*info.BlockSizeTokens(), request.Body.TokenizedRequest.TokenCount())
 }
 
 // buildSpeculativeCache constructs the TTL cache used to evict speculative
@@ -147,7 +152,7 @@ func buildSpeculativeCache(ctx context.Context, config PluginConfig,
 func (p *Producer) PreRequest(ctx context.Context,
 	request *scheduling.InferenceRequest, schedulingResult *scheduling.SchedulingResult,
 ) error {
-	p.recordPredictedCachedTokens(schedulingResult)
+	p.recordPrediction(request, schedulingResult)
 
 	if !p.speculativeEnabled {
 		return nil

@@ -231,15 +231,19 @@ func (p *dataProducer) PluginState() *plugin.PluginState {
 // Produce is called by the director before scheduling requests.
 func (p *dataProducer) Produce(ctx context.Context, request *fwksched.InferenceRequest, pods []fwksched.Endpoint) error {
 	blockSize := p.GetBlockSize(pods)
-	perPromptHashes := prefixhash.GetBlockHashes(ctx, request, blockSize, p.resolveMaxBlocks(blockSize))
+	perPromptHashes, perPromptTokens := prefixhash.GetBlockHashesWithPromptTokens(ctx, request, blockSize, p.resolveMaxBlocks(blockSize))
 
 	prefixCacheServers := make(map[ServerID]int)
+	predictedCachedTokens := make(map[ServerID]int)
 	totalBlocks := 0
-	for _, hashes := range perPromptHashes {
+	promptTokens := 0
+	for i, hashes := range perPromptHashes {
 		for server, matchLen := range p.matchLongestPrefix(ctx, hashes) {
 			prefixCacheServers[server] += matchLen
+			predictedCachedTokens[server] += min(matchLen*blockSize, perPromptTokens[i])
 		}
 		totalBlocks += len(hashes)
+		promptTokens += perPromptTokens[i]
 	}
 
 	for _, pod := range pods {
@@ -248,8 +252,10 @@ func (p *dataProducer) Produce(ctx context.Context, request *fwksched.InferenceR
 	}
 
 	state := &SchedulingContextState{
-		PerPromptHashes:    perPromptHashes,
-		PrefixCacheServers: prefixCacheServers,
+		PerPromptHashes:       perPromptHashes,
+		PrefixCacheServers:    prefixCacheServers,
+		PredictedCachedTokens: predictedCachedTokens,
+		PromptTokens:          promptTokens,
 	}
 
 	p.pluginState.Write(request.RequestID, plugin.StateKey(p.typedName.Name), state)
@@ -300,7 +306,8 @@ func (p *dataProducer) PreRequest(ctx context.Context, request *fwksched.Inferen
 	blockSize := p.GetBlockSize(primaryProfileResult.TargetEndpoints)
 	const averageCharactersPerToken = 4
 	recordPrefixCacheMatch(p.typedName.Name, p.typedName.Type, matchLen*blockSize*averageCharactersPerToken, total*blockSize*averageCharactersPerToken)
-	prefixmetrics.RecordPredictedCachedTokens(p.typedName.Name, p.typedName.Type, matchLen*blockSize)
+	prefixmetrics.RecordPrediction(p.typedName.Name, p.typedName.Type,
+		state.PredictedCachedTokens[ServerID(targetEndpoint.GetMetadata().ID)], state.PromptTokens)
 	return nil
 }
 

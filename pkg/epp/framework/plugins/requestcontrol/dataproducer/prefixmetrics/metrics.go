@@ -14,9 +14,9 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package prefixmetrics holds the metrics every prefix-aware data producer
-// emits, so approximate and precise deployments report prefix-cache prediction
-// under one metric name.
+// Package prefixmetrics holds the metrics the approximate and precise
+// prefix-cache producers share, so either deployment reports prefix-cache
+// prediction under one metric name.
 package prefixmetrics
 
 import (
@@ -30,9 +30,6 @@ import (
 	eppmetrics "github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
 
-// predictedCachedTokens pairs with llm_d_epp_request_cached_tokens: each _sum
-// over llm_d_epp_request_input_tokens_sum gives the prefix hit rate the router
-// predicted and the rate the model server delivered.
 var predictedCachedTokens = prometheus.NewHistogramVec(
 	prometheus.HistogramOpts{
 		Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
@@ -45,18 +42,35 @@ var predictedCachedTokens = prometheus.NewHistogramVec(
 	[]string{"plugin_name", "plugin_type"},
 )
 
+var promptTokens = prometheus.NewHistogramVec(
+	prometheus.HistogramOpts{
+		Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
+		Name:      "prefix_prompt_tokens",
+		Help: metricsutil.HelpMsgWithStability(
+			"Prompt tokens the producer measured its prediction against, per request.",
+			compbasemetrics.ALPHA),
+		Buckets: metricsutil.TokenCountBuckets,
+	},
+	[]string{"plugin_name", "plugin_type"},
+)
+
 var registerOnce sync.Once
 
 // Register makes the shared prefix metrics collectable. Every prefix producer
 // instance calls it; the first call registers.
 func Register() {
 	registerOnce.Do(func() {
-		metrics.Registry.MustRegister(predictedCachedTokens)
+		metrics.Registry.MustRegister(predictedCachedTokens, promptTokens)
 	})
 }
 
-// RecordPredictedCachedTokens records the prompt tokens the producer expects
-// the scheduler's chosen endpoint to serve from its prefix cache.
-func RecordPredictedCachedTokens(pluginName, pluginType string, tokens int) {
-	predictedCachedTokens.WithLabelValues(pluginName, pluginType).Observe(float64(tokens))
+// RecordPrediction records a request's prompt tokens alongside the subset the
+// producer expects the scheduler's chosen endpoint to serve from its prefix
+// cache. The two are observed together so the predicted hit rate divides counts
+// taken over the same requests. llm_d_epp_request_input_tokens is not a usable
+// denominator here: it is recorded from the model server's response, so it
+// omits requests that fail or return no usage, which this metric still counts.
+func RecordPrediction(pluginName, pluginType string, predictedCached, prompt int) {
+	predictedCachedTokens.WithLabelValues(pluginName, pluginType).Observe(float64(predictedCached))
+	promptTokens.WithLabelValues(pluginName, pluginType).Observe(float64(prompt))
 }
