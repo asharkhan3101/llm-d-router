@@ -22,10 +22,12 @@ import (
 	"time"
 
 	"github.com/jellydator/ttlcache/v3"
+	"github.com/llm-d/llm-d-router/pkg/kvcache"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"k8s.io/apimachinery/pkg/util/sets"
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
@@ -282,6 +284,74 @@ func TestPreRequest_BestAvailableComesFromProduce(t *testing.T) {
 		"the picker only scored the endpoint holding one block")
 	assert.Equal(t, beforeAvailable+float64(7*testBlockSize),
 		sharedPrefixHistogram(t, bestAvailableMetric, name).GetSampleSum())
+}
+
+// Produce computes the pre-filter maximum by iterating candidates and
+// converting blocks to tokens, and PreRequest reads it back out of plugin
+// state. Running both extension points keeps a regression in that iteration or
+// conversion from passing while the metric is stubbed into state.
+func TestProduceThenPreRequest_RecordsBothMaxima(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	prefixmetrics.Register()
+
+	const name = "precise-produce-to-prerequest"
+	const chosenBlocks, warmerBlocks, promptBlocks = 2, 5, 8
+
+	idx := &fakeKVCacheIndexer{
+		computeFromTokens: func(_ context.Context, _ []uint32, _ string, _ []*kvblock.BlockExtraFeatures) ([]kvblock.BlockHash, error) {
+			keys := make([]kvblock.BlockHash, promptBlocks)
+			for i := range keys {
+				keys[i] = kvblock.BlockHash(i + 1)
+			}
+			return keys, nil
+		},
+		matchBlockKeys: func(_ context.Context, _ []kvblock.BlockHash, _ sets.Set[string]) (map[string]kvcache.PodMatch, error) {
+			return map[string]kvcache.PodMatch{
+				"10.0.0.1:8080": {
+					WeightedScore: chosenBlocks, MatchedBlocks: chosenBlocks,
+					BlocksByTier: map[string]int{"gpu": chosenBlocks},
+				},
+				"10.0.0.2:8080": {
+					WeightedScore: warmerBlocks, MatchedBlocks: warmerBlocks,
+					BlocksByTier: map[string]int{"gpu": warmerBlocks},
+				},
+			}, nil
+		},
+	}
+	p := newProducerForProduceAndPreRequest(ctx, name, idx)
+
+	endpoints := freshEndpoints()
+	chosen := endpoints[0]
+	req := tokenizedRequest("req-produce-prerequest", promptBlocks*testBlockSize)
+	req.TargetModel = "test-model"
+	require.NoError(t, p.Produce(ctx, req, endpoints))
+
+	// endpoints[1] holds the longer prefix, and no filter let it reach the picker.
+	_ = p.PreRequest(ctx, req, primaryWithScored("default", chosen, chosen))
+
+	assert.Equal(t, float64(chosenBlocks*testBlockSize),
+		sharedPrefixHistogram(t, predictedCachedTokensMetric, name).GetSampleSum())
+	assert.Equal(t, float64(chosenBlocks*testBlockSize),
+		sharedPrefixHistogram(t, bestPredictedMetric, name).GetSampleSum(),
+		"only the chosen endpoint reached the picker")
+	assert.Equal(t, float64(warmerBlocks*testBlockSize),
+		sharedPrefixHistogram(t, bestAvailableMetric, name).GetSampleSum(),
+		"Produce saw the warmer candidate before filtering")
+	assert.Equal(t, float64(promptBlocks*testBlockSize),
+		sharedPrefixHistogram(t, promptTokensMetric, name).GetSampleSum())
+}
+
+// newProducerForProduceAndPreRequest builds a producer that can run both
+// extension points, so a prediction can be followed from the candidate match
+// through to the recorded metric.
+func newProducerForProduceAndPreRequest(ctx context.Context, name string, idx kvCacheIndexer) *Producer {
+	return &Producer{
+		typedName:       plugin.TypedName{Type: PluginType, Name: name},
+		kvCacheIndexer:  idx,
+		dk:              attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(name),
+		pluginState:     plugin.NewPluginState(ctx),
+		blockSizeTokens: testBlockSize,
+	}
 }
 
 // primaryWithScored selects target and reports scored as the candidates that
