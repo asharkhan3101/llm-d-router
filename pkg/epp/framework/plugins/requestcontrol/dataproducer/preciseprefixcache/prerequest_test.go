@@ -233,6 +233,72 @@ func TestPreRequest_NoMatchInfo_RecordsNothing(t *testing.T) {
 	assert.Equal(t, before, sharedPrefixHistogram(t, predictedCachedTokensMetric, name).GetSampleCount())
 }
 
+// The best the picker could have chosen spans every scored candidate, so a
+// request routed away from the warmer endpoint reports the hit it passed up.
+func TestPreRequest_BestPredictedSpansScoredCandidates(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	prefixmetrics.Register()
+
+	const name = "precise-best-scored"
+	p := newNamedProducerForPreRequest(ctx, name, false, &fakeKVBlockIndex{})
+
+	endpoints := freshEndpoints()
+	chosen, warmer := endpoints[0], endpoints[1]
+	chosen.Put(p.dk, attrprefix.NewPrefixCacheMatchInfo(1, 8, testBlockSize).WithCachedBlockCount(1))
+	warmer.Put(p.dk, attrprefix.NewPrefixCacheMatchInfo(6, 8, testBlockSize).WithCachedBlockCount(6))
+
+	beforeSelected := sharedPrefixHistogram(t, predictedCachedTokensMetric, name).GetSampleSum()
+	beforeBest := sharedPrefixHistogram(t, bestPredictedMetric, name).GetSampleSum()
+	_ = p.PreRequest(ctx, tokenizedRequest("req-best-scored", 8*testBlockSize),
+		primaryWithScored("default", chosen, chosen, warmer))
+
+	assert.Equal(t, beforeSelected+float64(1*testBlockSize),
+		sharedPrefixHistogram(t, predictedCachedTokensMetric, name).GetSampleSum())
+	assert.Equal(t, beforeBest+float64(6*testBlockSize),
+		sharedPrefixHistogram(t, bestPredictedMetric, name).GetSampleSum())
+}
+
+// A candidate dropped by a filter never reaches the picker. Produce records the
+// reuse it held, so it counts as available without counting as a hit the picker
+// could have taken.
+func TestPreRequest_BestAvailableComesFromProduce(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	prefixmetrics.Register()
+
+	const name = "precise-best-available"
+	p := newNamedProducerForPreRequest(ctx, name, false, &fakeKVBlockIndex{})
+
+	endpoint := freshEndpoints()[0]
+	endpoint.Put(p.dk, attrprefix.NewPrefixCacheMatchInfo(1, 8, testBlockSize).WithCachedBlockCount(1))
+	req := tokenizedRequest("req-best-available", 8*testBlockSize)
+	p.pluginState.Write(req.RequestID, bestAvailableStateKey, &bestAvailableState{cachedTokens: 7 * testBlockSize})
+
+	beforeBest := sharedPrefixHistogram(t, bestPredictedMetric, name).GetSampleSum()
+	beforeAvailable := sharedPrefixHistogram(t, bestAvailableMetric, name).GetSampleSum()
+	_ = p.PreRequest(ctx, req, primaryWithScored("default", endpoint, endpoint))
+
+	assert.Equal(t, beforeBest+float64(1*testBlockSize),
+		sharedPrefixHistogram(t, bestPredictedMetric, name).GetSampleSum(),
+		"the picker only scored the endpoint holding one block")
+	assert.Equal(t, beforeAvailable+float64(7*testBlockSize),
+		sharedPrefixHistogram(t, bestAvailableMetric, name).GetSampleSum())
+}
+
+// primaryWithScored selects target and reports scored as the candidates that
+// reached the picker. A candidate the scheduler filtered out is left out.
+func primaryWithScored(name string, target scheduling.Endpoint, scored ...scheduling.Endpoint) *scheduling.SchedulingResult {
+	candidates := make([]scheduling.ScoredEndpoint, 0, len(scored))
+	for _, endpoint := range scored {
+		candidates = append(candidates, scheduling.ScoredEndpoint{Endpoint: endpoint})
+	}
+	return &scheduling.SchedulingResult{
+		PrimaryProfileName: name,
+		ProfileResults: map[string]*scheduling.ProfileRunResult{
+			name: {TargetEndpoints: []scheduling.Endpoint{target}, ScoredCandidates: candidates},
+		},
+	}
+}
+
 func tokenizedRequest(id string, tokenCount int) *scheduling.InferenceRequest {
 	return &scheduling.InferenceRequest{
 		RequestID: id,
@@ -245,8 +311,10 @@ func tokenizedRequest(id string, tokenCount int) *scheduling.InferenceRequest {
 }
 
 const (
-	predictedCachedTokensMetric = "llm_d_epp_prefix_predicted_cached_tokens" //nolint:gosec // G101: metric name, not a credential
-	promptTokensMetric          = "llm_d_epp_prefix_prompt_tokens"           //nolint:gosec // G101: metric name, not a credential
+	predictedCachedTokensMetric = "llm_d_epp_prefix_predicted_cached_tokens"      //nolint:gosec // G101: metric name, not a credential
+	bestPredictedMetric         = "llm_d_epp_prefix_best_predicted_cached_tokens" //nolint:gosec // G101: metric name, not a credential
+	bestAvailableMetric         = "llm_d_epp_prefix_best_available_cached_tokens" //nolint:gosec // G101: metric name, not a credential
+	promptTokensMetric          = "llm_d_epp_prefix_prompt_tokens"                //nolint:gosec // G101: metric name, not a credential
 )
 
 // sharedPrefixHistogram reads a shared prefix metric out of the registry it is
