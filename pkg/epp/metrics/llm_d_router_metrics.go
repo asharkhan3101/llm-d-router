@@ -270,7 +270,7 @@ var (
 			Name:      "plugin_duration_seconds",
 			Help:      metricsutil.HelpMsgWithStability("Plugin processing latency distribution in seconds for each extension point, plugin type and plugin name.", compbasemetrics.ALPHA),
 			Buckets: []float64{
-				0.0001, 0.0002, 0.0005, 0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1,
+				0.0001, 0.0002, 0.0005, 0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10,
 			},
 		},
 		[]string{"extension_point", "plugin_type", "plugin_name"},
