@@ -198,10 +198,15 @@ match data but is not instrumented here. Requests that reach no endpoint are not
 
 | Full metric name | Type | Labels | Notes |
 |---|---|---|---|
-| `llm_d_epp_prefix_predicted_cached_tokens` | Histogram | `plugin_name`, `plugin_type` | Prompt tokens predicted to hit the chosen endpoint's prefix cache. |
-| `llm_d_epp_prefix_best_predicted_cached_tokens` | Histogram | `plugin_name`, `plugin_type` | Highest such prediction among the endpoints the scheduler selected from. |
-| `llm_d_epp_prefix_best_available_cached_tokens` | Histogram | `plugin_name`, `plugin_type` | Highest such prediction among the request's candidate endpoints before filtering. |
-| `llm_d_epp_prefix_prompt_tokens` | Histogram | `plugin_name`, `plugin_type` | Prompt tokens the predictions were measured against. |
+| `llm_d_epp_prefix_predicted_cached_tokens` | Histogram | `plugin_name`, `plugin_type`, `endpoint_role` | Prompt tokens predicted to hit the chosen endpoint's prefix cache. |
+| `llm_d_epp_prefix_best_predicted_cached_tokens` | Histogram | `plugin_name`, `plugin_type`, `endpoint_role` | Highest such prediction among the endpoints the scheduler selected from. |
+| `llm_d_epp_prefix_best_available_cached_tokens` | Histogram | `plugin_name`, `plugin_type`, `endpoint_role` | Highest such prediction among the request's candidate endpoints before filtering. |
+| `llm_d_epp_prefix_prompt_tokens` | Histogram | `plugin_name`, `plugin_type`, `endpoint_role` | Prompt tokens the predictions were measured against. |
+
+For a request disaggregated into prefill and decode stages, the prediction is recorded for the
+`prefill` profile's endpoint and `endpoint_role` is `prefill`, since the sidecar's default `nixlv2`
+KV connector returns the prefiller's cached-token count. For every other request it is recorded for
+the primary profile's endpoint, and `endpoint_role` is `decode`.
 
 The prefix hit rate the router predicted is `llm_d_epp_prefix_predicted_cached_tokens_sum` divided
 by `llm_d_epp_prefix_prompt_tokens_sum`. All four metrics are observed in one call, so any ratio
@@ -227,18 +232,18 @@ request token metrics come from the model server's response, so a request that f
 usage is counted in the predicted rate and absent from the delivered rate. Do not divide across the
 two pairs.
 
-Under disaggregated prefill/decode the ratios describe different pods. The prediction follows the
-primary profile's endpoint, which the disaggregated profile handler sets to the decode profile, while
-`llm_d_epp_request_cached_tokens` carries the count the sidecar takes from the prefiller. The gap
-between the ratios is not index accuracy in that topology.
+The `prefill` attribution matches only the `nixlv2` KV connector. The `shared-storage`, `sglang`,
+`mooncake`, and `offloading` connectors return the decoder's usage unchanged, so for a disaggregated
+request `llm_d_epp_request_cached_tokens` carries the decode pod's count while the prediction
+describes the prefill pod. Under those connectors the gap between the ratios is not index accuracy.
 
-The two maxima are scoped differently from each other in that topology.
-`llm_d_epp_prefix_best_predicted_cached_tokens` covers the decode profile's scored candidates, while
-`llm_d_epp_prefix_best_available_cached_tokens` is taken before the role filters run and so spans
-prefill and decode pods together. Both producers index the prompt against the prefill endpoint they
-select, so a prefill pod holding the prefix raises the available maximum while being unreachable by
-the decode decision. Read the ratio between the two maxima as a filtering signal only where prefill
-and decode are served by the same pods. The prefill profile's own routing decision is not measured.
+The two maxima are scoped differently from each other for a disaggregated request.
+`llm_d_epp_prefix_best_predicted_cached_tokens` covers the `prefill` profile's scored candidates,
+while `llm_d_epp_prefix_best_available_cached_tokens` is taken before the role filters run and so
+spans prefill and decode pods together. A decode pod holding the prefix raises the available maximum
+while being unreachable by the prefill decision. Read the ratio between the two maxima as a filtering
+signal only where prefill and decode are served by the same pods. The decode profile's routing
+decision is not measured for a disaggregated request.
 
 Token units follow the tokenizer backend. The vLLM render backend counts the same tokens the model
 server reports, and the two ratios are directly comparable. The `estimate` backend, which is the
@@ -248,6 +253,36 @@ self-consistent, but CJK, code, and chat-template-heavy inputs shift it against 
 `llm_d_epp_kv_cache_index_lookup_hits_total` also reports a best candidate, but not on terms that
 compare with these metrics: it counts blocks rather than tokens, only the precise producer feeds it,
 and it accumulates once per prompt rather than once per request.
+
+### Token producer render
+
+These metrics belong to the `token-producer` when it uses the vLLM render backend. The metric
+families are registered when the plugin is created; observations require render calls made for
+requests. The startup warmup probe is not observed.
+
+| Full metric name | Type | Labels | Notes |
+|---|---|---|---|
+| `llm_d_epp_token_producer_render_duration_seconds` | Histogram | `plugin_type`, `plugin_name`, `backend`, `result` | Duration of one render call, including a retry on an alternate endpoint. |
+| `llm_d_epp_token_producer_render_failures_total` | Counter | `plugin_type`, `plugin_name`, `backend`, `reason` | Failed render calls. |
+
+`backend` is `vllm`. `result` is `success`, `timeout`, `canceled` or `error`. A `canceled` call is
+one whose caller went away before the render returned, and it is not counted as a failure. `reason`
+is one of:
+
+| Reason | Meaning |
+|---|---|
+| `timeout` | The render budget (`vllm.timeout` for completions, the larger of `vllm.timeout` and `vllm.mmTimeout` otherwise), an `endpointDiscovery.attemptTimeout`, or the caller's deadline expired. |
+| `status` | The render endpoint returned a non-2xx status. |
+| `connection` | The request could not be sent or the connection failed before a response arrived. |
+| `decode` | The response body could not be decoded. |
+| `no_endpoints` | Endpoint discovery has no render endpoint to select. |
+| `other` | Any other failure. |
+
+A request whose render call fails is routed without a tokenized prompt, so prefix-cache scoring is
+skipped for it. A saturated render endpoint shows as a rising `timeout` rate with durations at the
+render budget, while a render endpoint that is down shows `connection` failures with short
+durations. The plugin also logs render failures at error level with the elapsed time and the
+configured timeout, at most once every 10 seconds per plugin instance.
 
 ### Multimodal encoder cache
 
@@ -309,6 +344,7 @@ This plugin records the routing decision for each request.
         *   `encode-decode` - encode disaggregation with local prefill+decode (E/PD)
         *   `encode-prefill-decode` - full three-stage pipeline (E/P/D)
 *   **Description:** Counts requests processed, broken down by the disaggregation routing decision.
+    Requests rejected because a required prefill stage found no endpoint are not counted.
 *   **Actionability:** Monitor the distribution across decision types to understand engagement per
     disaggregation mode. Sudden ratio changes may indicate configuration issues, workload shifts, or
     problems in the decision logic.

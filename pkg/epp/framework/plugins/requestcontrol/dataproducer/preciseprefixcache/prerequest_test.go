@@ -203,13 +203,81 @@ func TestPreRequest_RecordsPrediction(t *testing.T) {
 		WithCachedBlockCount(4))
 
 	// A non-default profile name proves the lookup follows PrimaryProfileName.
-	beforePredicted := sharedPrefixHistogram(t, predictedCachedTokensMetric, name).GetSampleSum()
-	beforePrompt := sharedPrefixHistogram(t, promptTokensMetric, name).GetSampleSum()
+	beforePredicted := sharedPrefixHistogram(t, predictedCachedTokensMetric, name, prefixmetrics.RoleDecode).GetSampleSum()
+	beforePrompt := sharedPrefixHistogram(t, promptTokensMetric, name, prefixmetrics.RoleDecode).GetSampleSum()
 	_ = p.PreRequest(ctx, tokenizedRequest("req-predicted", 8*testBlockSize),
 		primaryOnly("decode", endpoint))
 
-	assert.Equal(t, beforePredicted+float64(4*testBlockSize), sharedPrefixHistogram(t, predictedCachedTokensMetric, name).GetSampleSum())
-	assert.Equal(t, beforePrompt+float64(8*testBlockSize), sharedPrefixHistogram(t, promptTokensMetric, name).GetSampleSum())
+	assert.Equal(t, beforePredicted+float64(4*testBlockSize), sharedPrefixHistogram(t, predictedCachedTokensMetric, name, prefixmetrics.RoleDecode).GetSampleSum())
+	assert.Equal(t, beforePrompt+float64(8*testBlockSize), sharedPrefixHistogram(t, promptTokensMetric, name, prefixmetrics.RoleDecode).GetSampleSum())
+}
+
+// A disaggregated request's cached-token count comes back from the prefiller,
+// so the prediction reads the prefill endpoint's match info and is labelled
+// with the prefill role.
+func TestPreRequest_PD_RecordsPrefillPrediction(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	prefixmetrics.Register()
+
+	const name = "precise-predicted-pd"
+	p := newNamedProducerForPreRequest(ctx, name, false, &fakeKVBlockIndex{})
+
+	endpoints := freshEndpoints()
+	decode, prefill := endpoints[0], endpoints[1]
+	decode.Put(p.dk, attrprefix.NewPrefixCacheMatchInfo(8, 8, testBlockSize).WithCachedBlockCount(8))
+	prefill.Put(p.dk, attrprefix.NewPrefixCacheMatchInfo(3, 8, testBlockSize).WithCachedBlockCount(3))
+
+	beforePrefill := sharedPrefixHistogram(t, predictedCachedTokensMetric, name, prefixmetrics.RolePrefill).GetSampleSum()
+	beforePrompt := sharedPrefixHistogram(t, promptTokensMetric, name, prefixmetrics.RolePrefill).GetSampleSum()
+	beforeDecode := sharedPrefixHistogram(t, predictedCachedTokensMetric, name, prefixmetrics.RoleDecode).GetSampleCount()
+	_ = p.PreRequest(ctx, tokenizedRequest("req-pd", 8*testBlockSize), &scheduling.SchedulingResult{
+		PrimaryProfileName: "decode",
+		ProfileResults: map[string]*scheduling.ProfileRunResult{
+			"decode":                   {TargetEndpoints: []scheduling.Endpoint{decode}},
+			experimentalPrefillProfile: {TargetEndpoints: []scheduling.Endpoint{prefill}},
+		},
+	})
+
+	assert.Equal(t, beforePrefill+float64(3*testBlockSize),
+		sharedPrefixHistogram(t, predictedCachedTokensMetric, name, prefixmetrics.RolePrefill).GetSampleSum())
+	assert.Equal(t, beforePrompt+float64(8*testBlockSize),
+		sharedPrefixHistogram(t, promptTokensMetric, name, prefixmetrics.RolePrefill).GetSampleSum())
+	assert.Equal(t, beforeDecode,
+		sharedPrefixHistogram(t, predictedCachedTokensMetric, name, prefixmetrics.RoleDecode).GetSampleCount())
+}
+
+// Under P/D the best the picker could have chosen comes from the prefill
+// profile's candidates, the same profile the selected prediction follows, so a
+// warmer decode endpoint cannot push it above what prefill routing could reach.
+func TestPreRequest_PD_BestPredictedFollowsPrefillProfile(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	prefixmetrics.Register()
+
+	const name = "precise-best-pd"
+	p := newNamedProducerForPreRequest(ctx, name, false, &fakeKVBlockIndex{})
+
+	endpoints := freshEndpoints()
+	decode, prefill := endpoints[0], endpoints[1]
+	decode.Put(p.dk, attrprefix.NewPrefixCacheMatchInfo(8, 8, testBlockSize).WithCachedBlockCount(8))
+	prefill.Put(p.dk, attrprefix.NewPrefixCacheMatchInfo(3, 8, testBlockSize).WithCachedBlockCount(3))
+
+	before := sharedPrefixHistogram(t, bestPredictedMetric, name, prefixmetrics.RolePrefill).GetSampleSum()
+	_ = p.PreRequest(ctx, tokenizedRequest("req-best-pd", 8*testBlockSize), &scheduling.SchedulingResult{
+		PrimaryProfileName: "decode",
+		ProfileResults: map[string]*scheduling.ProfileRunResult{
+			"decode": {
+				TargetEndpoints:  []scheduling.Endpoint{decode},
+				ScoredCandidates: []scheduling.ScoredEndpoint{{Endpoint: decode}},
+			},
+			experimentalPrefillProfile: {
+				TargetEndpoints:  []scheduling.Endpoint{prefill},
+				ScoredCandidates: []scheduling.ScoredEndpoint{{Endpoint: prefill}},
+			},
+		},
+	})
+
+	assert.Equal(t, before+float64(3*testBlockSize),
+		sharedPrefixHistogram(t, bestPredictedMetric, name, prefixmetrics.RolePrefill).GetSampleSum())
 }
 
 // An endpoint the producer never published match info for is not observed:
@@ -221,10 +289,10 @@ func TestPreRequest_NoMatchInfo_RecordsNothing(t *testing.T) {
 	const name = "precise-predicted-absent"
 	p := newNamedProducerForPreRequest(ctx, name, false, &fakeKVBlockIndex{})
 
-	before := sharedPrefixHistogram(t, predictedCachedTokensMetric, name).GetSampleCount()
+	before := sharedPrefixHistogram(t, predictedCachedTokensMetric, name, prefixmetrics.RoleDecode).GetSampleCount()
 	_ = p.PreRequest(ctx, tokenizedRequest("req-no-info", testBlockSize),
 		primaryOnly("default", freshEndpoints()[0]))
-	assert.Equal(t, before, sharedPrefixHistogram(t, predictedCachedTokensMetric, name).GetSampleCount())
+	assert.Equal(t, before, sharedPrefixHistogram(t, predictedCachedTokensMetric, name, prefixmetrics.RoleDecode).GetSampleCount())
 
 	// No endpoint at all is equally a no-op.
 	_ = p.PreRequest(ctx, tokenizedRequest("req-no-endpoint", testBlockSize),
@@ -232,7 +300,7 @@ func TestPreRequest_NoMatchInfo_RecordsNothing(t *testing.T) {
 			PrimaryProfileName: "default",
 			ProfileResults:     map[string]*scheduling.ProfileRunResult{"default": {}},
 		})
-	assert.Equal(t, before, sharedPrefixHistogram(t, predictedCachedTokensMetric, name).GetSampleCount())
+	assert.Equal(t, before, sharedPrefixHistogram(t, predictedCachedTokensMetric, name, prefixmetrics.RoleDecode).GetSampleCount())
 }
 
 // The best the picker could have chosen spans every scored candidate, so a
@@ -249,15 +317,15 @@ func TestPreRequest_BestPredictedSpansScoredCandidates(t *testing.T) {
 	chosen.Put(p.dk, attrprefix.NewPrefixCacheMatchInfo(1, 8, testBlockSize).WithCachedBlockCount(1))
 	warmer.Put(p.dk, attrprefix.NewPrefixCacheMatchInfo(6, 8, testBlockSize).WithCachedBlockCount(6))
 
-	beforeSelected := sharedPrefixHistogram(t, predictedCachedTokensMetric, name).GetSampleSum()
-	beforeBest := sharedPrefixHistogram(t, bestPredictedMetric, name).GetSampleSum()
+	beforeSelected := sharedPrefixHistogram(t, predictedCachedTokensMetric, name, prefixmetrics.RoleDecode).GetSampleSum()
+	beforeBest := sharedPrefixHistogram(t, bestPredictedMetric, name, prefixmetrics.RoleDecode).GetSampleSum()
 	_ = p.PreRequest(ctx, tokenizedRequest("req-best-scored", 8*testBlockSize),
 		primaryWithScored("default", chosen, chosen, warmer))
 
 	assert.Equal(t, beforeSelected+float64(1*testBlockSize),
-		sharedPrefixHistogram(t, predictedCachedTokensMetric, name).GetSampleSum())
+		sharedPrefixHistogram(t, predictedCachedTokensMetric, name, prefixmetrics.RoleDecode).GetSampleSum())
 	assert.Equal(t, beforeBest+float64(6*testBlockSize),
-		sharedPrefixHistogram(t, bestPredictedMetric, name).GetSampleSum())
+		sharedPrefixHistogram(t, bestPredictedMetric, name, prefixmetrics.RoleDecode).GetSampleSum())
 }
 
 // A candidate dropped by a filter never reaches the picker. Produce records the
@@ -275,15 +343,15 @@ func TestPreRequest_BestAvailableComesFromProduce(t *testing.T) {
 	req := tokenizedRequest("req-best-available", 8*testBlockSize)
 	p.pluginState.Write(req.RequestID, bestAvailableStateKey, &bestAvailableState{cachedTokens: 7 * testBlockSize})
 
-	beforeBest := sharedPrefixHistogram(t, bestPredictedMetric, name).GetSampleSum()
-	beforeAvailable := sharedPrefixHistogram(t, bestAvailableMetric, name).GetSampleSum()
+	beforeBest := sharedPrefixHistogram(t, bestPredictedMetric, name, prefixmetrics.RoleDecode).GetSampleSum()
+	beforeAvailable := sharedPrefixHistogram(t, bestAvailableMetric, name, prefixmetrics.RoleDecode).GetSampleSum()
 	_ = p.PreRequest(ctx, req, primaryWithScored("default", endpoint, endpoint))
 
 	assert.Equal(t, beforeBest+float64(1*testBlockSize),
-		sharedPrefixHistogram(t, bestPredictedMetric, name).GetSampleSum(),
+		sharedPrefixHistogram(t, bestPredictedMetric, name, prefixmetrics.RoleDecode).GetSampleSum(),
 		"the picker only scored the endpoint holding one block")
 	assert.Equal(t, beforeAvailable+float64(7*testBlockSize),
-		sharedPrefixHistogram(t, bestAvailableMetric, name).GetSampleSum())
+		sharedPrefixHistogram(t, bestAvailableMetric, name, prefixmetrics.RoleDecode).GetSampleSum())
 }
 
 // Produce computes the pre-filter maximum by iterating candidates and
@@ -330,15 +398,15 @@ func TestProduceThenPreRequest_RecordsBothMaxima(t *testing.T) {
 	_ = p.PreRequest(ctx, req, primaryWithScored("default", chosen, chosen))
 
 	assert.Equal(t, float64(chosenBlocks*testBlockSize),
-		sharedPrefixHistogram(t, predictedCachedTokensMetric, name).GetSampleSum())
+		sharedPrefixHistogram(t, predictedCachedTokensMetric, name, prefixmetrics.RoleDecode).GetSampleSum())
 	assert.Equal(t, float64(chosenBlocks*testBlockSize),
-		sharedPrefixHistogram(t, bestPredictedMetric, name).GetSampleSum(),
+		sharedPrefixHistogram(t, bestPredictedMetric, name, prefixmetrics.RoleDecode).GetSampleSum(),
 		"only the chosen endpoint reached the picker")
 	assert.Equal(t, float64(warmerBlocks*testBlockSize),
-		sharedPrefixHistogram(t, bestAvailableMetric, name).GetSampleSum(),
+		sharedPrefixHistogram(t, bestAvailableMetric, name, prefixmetrics.RoleDecode).GetSampleSum(),
 		"Produce saw the warmer candidate before filtering")
 	assert.Equal(t, float64(promptBlocks*testBlockSize),
-		sharedPrefixHistogram(t, promptTokensMetric, name).GetSampleSum())
+		sharedPrefixHistogram(t, promptTokensMetric, name, prefixmetrics.RoleDecode).GetSampleSum())
 }
 
 // newProducerForProduceAndPreRequest builds a producer that can run both
@@ -390,7 +458,7 @@ const (
 // sharedPrefixHistogram reads a shared prefix metric out of the registry it is
 // registered against, since those metrics live in another package. A metric
 // that has not been observed yet reads as nil, whose accessors return zero.
-func sharedPrefixHistogram(t *testing.T, metricName, pluginName string) *dto.Histogram {
+func sharedPrefixHistogram(t *testing.T, metricName, pluginName, role string) *dto.Histogram {
 	t.Helper()
 	families, err := ctrlmetrics.Registry.Gather()
 	require.NoError(t, err)
@@ -399,10 +467,12 @@ func sharedPrefixHistogram(t *testing.T, metricName, pluginName string) *dto.His
 			continue
 		}
 		for _, metric := range family.GetMetric() {
+			labels := map[string]string{}
 			for _, label := range metric.GetLabel() {
-				if label.GetName() == "plugin_name" && label.GetValue() == pluginName {
-					return metric.GetHistogram()
-				}
+				labels[label.GetName()] = label.GetValue()
+			}
+			if labels["plugin_name"] == pluginName && labels["endpoint_role"] == role {
+				return metric.GetHistogram()
 			}
 		}
 	}

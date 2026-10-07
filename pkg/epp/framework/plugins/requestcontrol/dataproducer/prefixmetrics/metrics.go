@@ -27,7 +27,14 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	eppmetrics "github.com/llm-d/llm-d-router/pkg/epp/metrics"
+)
+
+// Values of the endpoint_role label: the stage the endpoint serves for the request.
+const (
+	RolePrefill = "prefill"
+	RoleDecode  = "decode"
 )
 
 var predictedCachedTokens = prometheus.NewHistogramVec(
@@ -39,7 +46,7 @@ var predictedCachedTokens = prometheus.NewHistogramVec(
 			compbasemetrics.ALPHA),
 		Buckets: metricsutil.TokenCountBuckets,
 	},
-	[]string{"plugin_name", "plugin_type"},
+	[]string{"plugin_name", "plugin_type", "endpoint_role"},
 )
 
 var bestPredictedCachedTokens = prometheus.NewHistogramVec(
@@ -51,7 +58,7 @@ var bestPredictedCachedTokens = prometheus.NewHistogramVec(
 			compbasemetrics.ALPHA),
 		Buckets: metricsutil.TokenCountBuckets,
 	},
-	[]string{"plugin_name", "plugin_type"},
+	[]string{"plugin_name", "plugin_type", "endpoint_role"},
 )
 
 var bestAvailableCachedTokens = prometheus.NewHistogramVec(
@@ -63,7 +70,7 @@ var bestAvailableCachedTokens = prometheus.NewHistogramVec(
 			compbasemetrics.ALPHA),
 		Buckets: metricsutil.TokenCountBuckets,
 	},
-	[]string{"plugin_name", "plugin_type"},
+	[]string{"plugin_name", "plugin_type", "endpoint_role"},
 )
 
 var promptTokens = prometheus.NewHistogramVec(
@@ -75,7 +82,7 @@ var promptTokens = prometheus.NewHistogramVec(
 			compbasemetrics.ALPHA),
 		Buckets: metricsutil.TokenCountBuckets,
 	},
-	[]string{"plugin_name", "plugin_type"},
+	[]string{"plugin_name", "plugin_type", "endpoint_role"},
 )
 
 var registerOnce sync.Once
@@ -92,8 +99,8 @@ func Register() {
 // Prediction is one request's prefix-cache prediction in prompt tokens, taken
 // over three endpoint sets that narrow into each other: every candidate the
 // request could have reached, those that survived filtering and reached the
-// picker, and the one the picker chose. Selected <= BestPredicted <=
-// BestAvailable holds by construction.
+// picker of the profile PredictionTarget returns, and the one that picker
+// chose. Selected <= BestPredicted <= BestAvailable holds by construction.
 type Prediction struct {
 	// Selected is what the producer expects the chosen endpoint to serve from
 	// its prefix cache.
@@ -104,21 +111,41 @@ type Prediction struct {
 	// BestAvailable is the highest prediction among the candidate endpoints
 	// before filters ran. Scheduling profiles filter by endpoint role, so under
 	// disaggregated prefill/decode this spans both roles while the other two
-	// fields follow the decode profile.
+	// fields follow the prefill profile.
 	BestAvailable int
 	// PromptTokens is the prompt the predictions are measured against.
 	PromptTokens int
 }
 
-// RecordPrediction records a request's prefix-cache prediction. Every field is
-// observed in one call so each histogram covers the same requests, which is
-// what lets their sums be divided by one another.
+// RecordPrediction records a request's prefix-cache prediction under role.
+// Every field is observed in one call so each histogram covers the same
+// requests, which is what lets their sums be divided by one another.
 // llm_d_epp_request_input_tokens is not a usable denominator here: it is
 // recorded from the model server's response, so it omits requests that fail or
 // return no usage, which these metrics still count.
-func RecordPrediction(pluginName, pluginType string, p Prediction) {
-	predictedCachedTokens.WithLabelValues(pluginName, pluginType).Observe(float64(p.Selected))
-	bestPredictedCachedTokens.WithLabelValues(pluginName, pluginType).Observe(float64(p.BestPredicted))
-	bestAvailableCachedTokens.WithLabelValues(pluginName, pluginType).Observe(float64(p.BestAvailable))
-	promptTokens.WithLabelValues(pluginName, pluginType).Observe(float64(p.PromptTokens))
+func RecordPrediction(pluginName, pluginType, role string, p Prediction) {
+	predictedCachedTokens.WithLabelValues(pluginName, pluginType, role).Observe(float64(p.Selected))
+	bestPredictedCachedTokens.WithLabelValues(pluginName, pluginType, role).Observe(float64(p.BestPredicted))
+	bestAvailableCachedTokens.WithLabelValues(pluginName, pluginType, role).Observe(float64(p.BestAvailable))
+	promptTokens.WithLabelValues(pluginName, pluginType, role).Observe(float64(p.PromptTokens))
+}
+
+// PredictionTarget returns the profile result whose first target endpoint the
+// request's prefix-cache prediction is recorded for, and the endpoint_role to
+// record it under. A request with a target in prefillProfile is attributed to
+// that profile, because the sidecar's nixlv2 KV connector reports the
+// prefiller's cached-token count. The other KV connectors report the decoder's
+// count, which this does not match. It returns nil when the primary profile
+// selected no endpoint.
+func PredictionTarget(result *fwksched.SchedulingResult, prefillProfile string) (*fwksched.ProfileRunResult, string) {
+	if result == nil {
+		return nil, ""
+	}
+	if pr := result.ProfileResults[prefillProfile]; pr != nil && len(pr.TargetEndpoints) > 0 {
+		return pr, RolePrefill
+	}
+	if primary := result.ProfileResults[result.PrimaryProfileName]; primary != nil && len(primary.TargetEndpoints) > 0 {
+		return primary, RoleDecode
+	}
+	return nil, ""
 }

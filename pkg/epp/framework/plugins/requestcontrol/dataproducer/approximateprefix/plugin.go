@@ -307,10 +307,11 @@ func (p *dataProducer) PreRequest(ctx context.Context, request *fwksched.Inferen
 	const averageCharactersPerToken = 4
 	recordPrefixCacheMatch(p.typedName.Name, p.typedName.Type, matchLen*blockSize*averageCharactersPerToken, total*blockSize*averageCharactersPerToken)
 	if request.Body != nil {
-		selected := state.PredictedCachedTokens[ServerID(targetEndpoint.GetMetadata().ID)]
-		prefixmetrics.RecordPrediction(p.typedName.Name, p.typedName.Type, prefixmetrics.Prediction{
+		predictionProfile, role := prefixmetrics.PredictionTarget(schedulingResult, experimentalDefaultPrefillProfile)
+		selected := state.PredictedCachedTokens[ServerID(predictionProfile.TargetEndpoints[0].GetMetadata().ID)]
+		prefixmetrics.RecordPrediction(p.typedName.Name, p.typedName.Type, role, prefixmetrics.Prediction{
 			Selected:      selected,
-			BestPredicted: bestAmongScored(primaryProfileResult.ScoredCandidates, state.PredictedCachedTokens, selected),
+			BestPredicted: bestAmongScored(predictionProfile.ScoredCandidates, state.PredictedCachedTokens, selected),
 			BestAvailable: state.BestAvailableCachedTokens,
 			PromptTokens:  request.Body.TokenizedRequest.TokenCount(),
 		})

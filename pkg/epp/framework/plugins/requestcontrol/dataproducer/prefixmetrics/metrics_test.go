@@ -23,6 +23,10 @@ import (
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	k8stypes "k8s.io/apimachinery/pkg/types"
+
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
 // Every producer instance calls Register, so repeated calls must not panic.
@@ -36,32 +40,41 @@ func TestRegisterIsIdempotent(t *testing.T) {
 // A zero prediction is a real observation: the router expected no cache hit,
 // and the request still contributes its prompt tokens to the denominator.
 // Every field lands on its own histogram, and all four carry a sample per
-// call so their sums stay divisible by one another.
+// call under the call's role so their sums stay divisible by one another.
 func TestRecordPrediction(t *testing.T) {
 	resetPredictionMetrics()
 	t.Cleanup(resetPredictionMetrics)
 
-	RecordPrediction("test-plugin", "test-type", Prediction{
+	RecordPrediction("test-plugin", "test-type", RoleDecode, Prediction{
 		Selected: 512, BestPredicted: 768, BestAvailable: 896, PromptTokens: 1024,
 	})
-	RecordPrediction("test-plugin", "test-type", Prediction{
+	RecordPrediction("test-plugin", "test-type", RoleDecode, Prediction{
 		Selected: 0, BestPredicted: 0, BestAvailable: 0, PromptTokens: 256,
+	})
+	RecordPrediction("test-plugin", "test-type", RolePrefill, Prediction{
+		Selected: 64, BestPredicted: 96, BestAvailable: 112, PromptTokens: 128,
 	})
 
 	for _, tc := range []struct {
-		name string
-		vec  *prometheus.HistogramVec
-		sum  float64
+		name  string
+		vec   *prometheus.HistogramVec
+		role  string
+		count uint64
+		sum   float64
 	}{
-		{"selected", predictedCachedTokens, 512},
-		{"best predicted", bestPredictedCachedTokens, 768},
-		{"best available", bestAvailableCachedTokens, 896},
-		{"prompt", promptTokens, 1280},
+		{"decode selected", predictedCachedTokens, RoleDecode, 2, 512},
+		{"decode best predicted", bestPredictedCachedTokens, RoleDecode, 2, 768},
+		{"decode best available", bestAvailableCachedTokens, RoleDecode, 2, 896},
+		{"decode prompt", promptTokens, RoleDecode, 2, 1280},
+		{"prefill selected", predictedCachedTokens, RolePrefill, 1, 64},
+		{"prefill best predicted", bestPredictedCachedTokens, RolePrefill, 1, 96},
+		{"prefill best available", bestAvailableCachedTokens, RolePrefill, 1, 112},
+		{"prefill prompt", promptTokens, RolePrefill, 1, 128},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			histogram, err := histogramFor(tc.vec, "test-plugin", "test-type")
+			histogram, err := histogramFor(tc.vec, "test-plugin", "test-type", tc.role)
 			require.NoError(t, err)
-			assert.Equal(t, uint64(2), histogram.GetSampleCount())
+			assert.Equal(t, tc.count, histogram.GetSampleCount())
 			assert.Equal(t, tc.sum, histogram.GetSampleSum())
 		})
 	}
@@ -72,6 +85,83 @@ func resetPredictionMetrics() {
 	bestPredictedCachedTokens.Reset()
 	bestAvailableCachedTokens.Reset()
 	promptTokens.Reset()
+}
+
+// Under P/D the sidecar reports the prefill stage's cached tokens, so the
+// prediction follows the prefill profile when the request was disaggregated and
+// the primary profile otherwise.
+func TestPredictionTarget(t *testing.T) {
+	decodeProfile := &fwksched.ProfileRunResult{TargetEndpoints: []fwksched.Endpoint{endpointNamed("decode-pod")}}
+	prefillProfile := &fwksched.ProfileRunResult{TargetEndpoints: []fwksched.Endpoint{endpointNamed("prefill-pod")}}
+
+	tests := []struct {
+		name        string
+		result      *fwksched.SchedulingResult
+		wantProfile *fwksched.ProfileRunResult
+		wantRole    string
+	}{
+		{
+			name:     "nil result",
+			result:   nil,
+			wantRole: "",
+		},
+		{
+			name: "primary only",
+			result: &fwksched.SchedulingResult{
+				PrimaryProfileName: "decode",
+				ProfileResults: map[string]*fwksched.ProfileRunResult{
+					"decode": decodeProfile,
+				},
+			},
+			wantProfile: decodeProfile,
+			wantRole:    RoleDecode,
+		},
+		{
+			name: "disaggregated",
+			result: &fwksched.SchedulingResult{
+				PrimaryProfileName: "decode",
+				ProfileResults: map[string]*fwksched.ProfileRunResult{
+					"decode":  decodeProfile,
+					"prefill": prefillProfile,
+				},
+			},
+			wantProfile: prefillProfile,
+			wantRole:    RolePrefill,
+		},
+		{
+			name: "prefill profile ran without a target",
+			result: &fwksched.SchedulingResult{
+				PrimaryProfileName: "decode",
+				ProfileResults: map[string]*fwksched.ProfileRunResult{
+					"decode":  decodeProfile,
+					"prefill": nil,
+				},
+			},
+			wantProfile: decodeProfile,
+			wantRole:    RoleDecode,
+		},
+		{
+			name: "no primary target",
+			result: &fwksched.SchedulingResult{
+				PrimaryProfileName: "decode",
+				ProfileResults:     map[string]*fwksched.ProfileRunResult{"decode": {}},
+			},
+			wantRole: "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			profile, role := PredictionTarget(tt.result, "prefill")
+			assert.Same(t, tt.wantProfile, profile)
+			assert.Equal(t, tt.wantRole, role)
+		})
+	}
+}
+
+func endpointNamed(name string) fwksched.Endpoint {
+	return fwksched.NewEndpoint(
+		&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: name, Namespace: "default"}},
+		fwkdl.NewMetrics(), fwkdl.NewAttributes())
 }
 
 func histogramFor(vec *prometheus.HistogramVec, labelValues ...string) (*dto.Histogram, error) {

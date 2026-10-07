@@ -101,19 +101,17 @@ func (p *Producer) matchInfo(endpoint scheduling.Endpoint) (*attrprefix.PrefixCa
 	return info, ok
 }
 
-// recordPrediction reports the prediction for the chosen endpoint against the
-// best the picker could have chosen and the best any candidate held before
-// filtering, so the reuse a routing decision left behind is separable from the
-// reuse filtering put out of reach.
+// recordPrediction reports the prediction for the endpoint chosen by
+// prefixmetrics.PredictionTarget against the best its profile's picker could
+// have chosen and the best any candidate held before filtering, so the reuse a
+// routing decision left behind is separable from the reuse filtering put out of
+// reach.
 func (p *Producer) recordPrediction(request *scheduling.InferenceRequest, schedulingResult *scheduling.SchedulingResult) {
-	if schedulingResult == nil || schedulingResult.ProfileResults == nil {
+	profile, role := prefixmetrics.PredictionTarget(schedulingResult, experimentalPrefillProfile)
+	if profile == nil {
 		return
 	}
-	primary := schedulingResult.ProfileResults[schedulingResult.PrimaryProfileName]
-	if primary == nil || len(primary.TargetEndpoints) == 0 {
-		return
-	}
-	info, ok := p.matchInfo(primary.TargetEndpoints[0])
+	info, ok := p.matchInfo(profile.TargetEndpoints[0])
 	if !ok {
 		return
 	}
@@ -126,7 +124,7 @@ func (p *Producer) recordPrediction(request *scheduling.InferenceRequest, schedu
 	// endpoint to go on, so selected stands in. That keeps the histograms on
 	// the same requests, at the cost of reading as a perfect routing decision.
 	bestPredicted := selected
-	for _, candidate := range primary.ScoredCandidates {
+	for _, candidate := range profile.ScoredCandidates {
 		if candidateInfo, ok := p.matchInfo(candidate.Endpoint); ok {
 			bestPredicted = max(bestPredicted, predictedCachedTokens(candidateInfo))
 		}
@@ -138,7 +136,7 @@ func (p *Producer) recordPrediction(request *scheduling.InferenceRequest, schedu
 		bestAvailable = max(bestAvailable, state.cachedTokens)
 	}
 
-	prefixmetrics.RecordPrediction(p.typedName.Name, p.typedName.Type, prefixmetrics.Prediction{
+	prefixmetrics.RecordPrediction(p.typedName.Name, p.typedName.Type, role, prefixmetrics.Prediction{
 		Selected:      selected,
 		BestPredicted: bestPredicted,
 		BestAvailable: bestAvailable,
