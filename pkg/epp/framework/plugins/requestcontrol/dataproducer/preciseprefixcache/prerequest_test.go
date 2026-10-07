@@ -280,6 +280,29 @@ func TestPreRequest_PD_BestPredictedFollowsPrefillProfile(t *testing.T) {
 		sharedPrefixHistogram(t, bestPredictedMetric, name, prefixmetrics.RolePrefill).GetSampleSum())
 }
 
+// The two maxima carry the modalities the request holds, so the reuse routing
+// and filtering left behind can be split between multimodal and text-only
+// traffic.
+func TestPreRequest_MaximaCarryModality(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	prefixmetrics.Register()
+
+	const name = "precise-best-modality"
+	p := newNamedProducerForPreRequest(ctx, name, false, &fakeKVBlockIndex{})
+
+	endpoint := freshEndpoints()[0]
+	endpoint.Put(p.dk, attrprefix.NewPrefixCacheMatchInfo(2, 8, testBlockSize).WithCachedBlockCount(2))
+	req := tokenizedRequest("req-best-modality", 8*testBlockSize)
+	req.Body.TokenizedRequest.Prompts[0].MultiModalFeatures = []fwkrh.MultiModalFeature{
+		{Modality: fwkrh.ModalityImage, Hash: "img"},
+		{Modality: "audio", Hash: "aud"},
+	}
+	_ = p.PreRequest(ctx, req, primaryOnly("default", endpoint))
+
+	assert.Equal(t, "audio,image", sharedPrefixModality(t, bestPredictedMetric, name))
+	assert.Equal(t, "audio,image", sharedPrefixModality(t, bestAvailableMetric, name))
+}
+
 // An endpoint the producer never published match info for is not observed:
 // a zero would be indistinguishable from a real zero-hit prediction.
 func TestPreRequest_NoMatchInfo_RecordsNothing(t *testing.T) {
@@ -477,4 +500,29 @@ func sharedPrefixHistogram(t *testing.T, metricName, pluginName, role string) *d
 		}
 	}
 	return nil
+}
+
+// sharedPrefixModality returns the modality label of the plugin's only series
+// of a shared prefix metric.
+func sharedPrefixModality(t *testing.T, metricName, pluginName string) string {
+	t.Helper()
+	families, err := ctrlmetrics.Registry.Gather()
+	require.NoError(t, err)
+	var modalities []string
+	for _, family := range families {
+		if family.GetName() != metricName {
+			continue
+		}
+		for _, metric := range family.GetMetric() {
+			labels := map[string]string{}
+			for _, label := range metric.GetLabel() {
+				labels[label.GetName()] = label.GetValue()
+			}
+			if labels["plugin_name"] == pluginName {
+				modalities = append(modalities, labels["modality"])
+			}
+		}
+	}
+	require.Len(t, modalities, 1)
+	return modalities[0]
 }

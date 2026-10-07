@@ -199,14 +199,18 @@ match data but is not instrumented here. Requests that reach no endpoint are not
 | Full metric name | Type | Labels | Notes |
 |---|---|---|---|
 | `llm_d_epp_prefix_predicted_cached_tokens` | Histogram | `plugin_name`, `plugin_type`, `endpoint_role` | Prompt tokens predicted to hit the chosen endpoint's prefix cache. |
-| `llm_d_epp_prefix_best_predicted_cached_tokens` | Histogram | `plugin_name`, `plugin_type`, `endpoint_role` | Highest such prediction among the endpoints the scheduler selected from. |
-| `llm_d_epp_prefix_best_available_cached_tokens` | Histogram | `plugin_name`, `plugin_type`, `endpoint_role` | Highest such prediction among the request's candidate endpoints before filtering. |
+| `llm_d_epp_prefix_best_predicted_cached_tokens` | Histogram | `plugin_name`, `plugin_type`, `endpoint_role`, `modality` | Highest such prediction among the endpoints the scheduler selected from. |
+| `llm_d_epp_prefix_best_available_cached_tokens` | Histogram | `plugin_name`, `plugin_type`, `endpoint_role`, `modality` | Highest such prediction among the request's candidate endpoints before filtering. |
 | `llm_d_epp_prefix_prompt_tokens` | Histogram | `plugin_name`, `plugin_type`, `endpoint_role` | Prompt tokens the predictions were measured against. |
 
 For a request disaggregated into prefill and decode stages, the prediction is recorded for the
 `prefill` profile's endpoint and `endpoint_role` is `prefill`, since the sidecar's default `nixlv2`
 KV connector returns the prefiller's cached-token count. For every other request it is recorded for
 the primary profile's endpoint, and `endpoint_role` is `decode`.
+
+The `modality` label holds the modalities the request carries as a comma-joined sorted list (`none`
+for text-only), the same value as the `mm.modality` span attribute. Each request is observed once,
+so summing over `modality` keeps every ratio below exact.
 
 The prefix hit rate the router predicted is `llm_d_epp_prefix_predicted_cached_tokens_sum` divided
 by `llm_d_epp_prefix_prompt_tokens_sum`. All four metrics are observed in one call, so any ratio

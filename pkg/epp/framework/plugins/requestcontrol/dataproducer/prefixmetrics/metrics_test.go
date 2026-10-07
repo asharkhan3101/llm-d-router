@@ -27,6 +27,7 @@ import (
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	mmobs "github.com/llm-d/llm-d-router/pkg/epp/framework/observability/multimodal"
 )
 
 // Every producer instance calls Register, so repeated calls must not panic.
@@ -41,38 +42,39 @@ func TestRegisterIsIdempotent(t *testing.T) {
 // and the request still contributes its prompt tokens to the denominator.
 // Every field lands on its own histogram, and all four carry a sample per
 // call under the call's role so their sums stay divisible by one another.
+// The two maxima are also split by the call's modality.
 func TestRecordPrediction(t *testing.T) {
 	resetPredictionMetrics()
 	t.Cleanup(resetPredictionMetrics)
 
-	RecordPrediction("test-plugin", "test-type", RoleDecode, Prediction{
+	RecordPrediction("test-plugin", "test-type", RoleDecode, mmobs.ModalityNone, Prediction{
 		Selected: 512, BestPredicted: 768, BestAvailable: 896, PromptTokens: 1024,
 	})
-	RecordPrediction("test-plugin", "test-type", RoleDecode, Prediction{
+	RecordPrediction("test-plugin", "test-type", RoleDecode, mmobs.ModalityNone, Prediction{
 		Selected: 0, BestPredicted: 0, BestAvailable: 0, PromptTokens: 256,
 	})
-	RecordPrediction("test-plugin", "test-type", RolePrefill, Prediction{
+	RecordPrediction("test-plugin", "test-type", RolePrefill, "audio,image", Prediction{
 		Selected: 64, BestPredicted: 96, BestAvailable: 112, PromptTokens: 128,
 	})
 
 	for _, tc := range []struct {
-		name  string
-		vec   *prometheus.HistogramVec
-		role  string
-		count uint64
-		sum   float64
+		name   string
+		vec    *prometheus.HistogramVec
+		labels []string
+		count  uint64
+		sum    float64
 	}{
-		{"decode selected", predictedCachedTokens, RoleDecode, 2, 512},
-		{"decode best predicted", bestPredictedCachedTokens, RoleDecode, 2, 768},
-		{"decode best available", bestAvailableCachedTokens, RoleDecode, 2, 896},
-		{"decode prompt", promptTokens, RoleDecode, 2, 1280},
-		{"prefill selected", predictedCachedTokens, RolePrefill, 1, 64},
-		{"prefill best predicted", bestPredictedCachedTokens, RolePrefill, 1, 96},
-		{"prefill best available", bestAvailableCachedTokens, RolePrefill, 1, 112},
-		{"prefill prompt", promptTokens, RolePrefill, 1, 128},
+		{"decode selected", predictedCachedTokens, []string{RoleDecode}, 2, 512},
+		{"decode best predicted", bestPredictedCachedTokens, []string{RoleDecode, mmobs.ModalityNone}, 2, 768},
+		{"decode best available", bestAvailableCachedTokens, []string{RoleDecode, mmobs.ModalityNone}, 2, 896},
+		{"decode prompt", promptTokens, []string{RoleDecode}, 2, 1280},
+		{"prefill selected", predictedCachedTokens, []string{RolePrefill}, 1, 64},
+		{"prefill best predicted", bestPredictedCachedTokens, []string{RolePrefill, "audio,image"}, 1, 96},
+		{"prefill best available", bestAvailableCachedTokens, []string{RolePrefill, "audio,image"}, 1, 112},
+		{"prefill prompt", promptTokens, []string{RolePrefill}, 1, 128},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			histogram, err := histogramFor(tc.vec, "test-plugin", "test-type", tc.role)
+			histogram, err := histogramFor(tc.vec, append([]string{"test-plugin", "test-type"}, tc.labels...)...)
 			require.NoError(t, err)
 			assert.Equal(t, tc.count, histogram.GetSampleCount())
 			assert.Equal(t, tc.sum, histogram.GetSampleSum())

@@ -29,6 +29,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	mmobs "github.com/llm-d/llm-d-router/pkg/epp/framework/observability/multimodal"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/prefixmetrics"
 )
@@ -136,7 +137,8 @@ func (p *Producer) recordPrediction(request *scheduling.InferenceRequest, schedu
 		bestAvailable = max(bestAvailable, state.cachedTokens)
 	}
 
-	prefixmetrics.RecordPrediction(p.typedName.Name, p.typedName.Type, role, prefixmetrics.Prediction{
+	modality, _ := mmobs.Summary(request)
+	prefixmetrics.RecordPrediction(p.typedName.Name, p.typedName.Type, role, modality, prefixmetrics.Prediction{
 		Selected:      selected,
 		BestPredicted: bestPredicted,
 		BestAvailable: bestAvailable,

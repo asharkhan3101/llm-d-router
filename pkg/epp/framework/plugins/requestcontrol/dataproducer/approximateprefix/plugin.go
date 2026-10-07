@@ -32,6 +32,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	mmobs "github.com/llm-d/llm-d-router/pkg/epp/framework/observability/multimodal"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	approxprefixconstants "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/approximateprefix/constants"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/prefixhash"
@@ -309,7 +310,8 @@ func (p *dataProducer) PreRequest(ctx context.Context, request *fwksched.Inferen
 	if request.Body != nil {
 		predictionProfile, role := prefixmetrics.PredictionTarget(schedulingResult, experimentalDefaultPrefillProfile)
 		selected := state.PredictedCachedTokens[ServerID(predictionProfile.TargetEndpoints[0].GetMetadata().ID)]
-		prefixmetrics.RecordPrediction(p.typedName.Name, p.typedName.Type, role, prefixmetrics.Prediction{
+		modality, _ := mmobs.Summary(request)
+		prefixmetrics.RecordPrediction(p.typedName.Name, p.typedName.Type, role, modality, prefixmetrics.Prediction{
 			Selected:      selected,
 			BestPredicted: bestAmongScored(predictionProfile.ScoredCandidates, state.PredictedCachedTokens, selected),
 			BestAvailable: state.BestAvailableCachedTokens,

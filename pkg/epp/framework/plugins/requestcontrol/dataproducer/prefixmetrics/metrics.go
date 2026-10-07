@@ -37,6 +37,8 @@ const (
 	RoleDecode  = "decode"
 )
 
+const modalityLabelHelp = "The modality label holds the request's carried modalities as a comma-joined sorted list (none for text-only), matching the mm.modality span attribute; each request is observed once."
+
 var predictedCachedTokens = prometheus.NewHistogramVec(
 	prometheus.HistogramOpts{
 		Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
@@ -54,11 +56,11 @@ var bestPredictedCachedTokens = prometheus.NewHistogramVec(
 		Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
 		Name:      "prefix_best_predicted_cached_tokens",
 		Help: metricsutil.HelpMsgWithStability(
-			"Highest prefix-cache prediction among the endpoints the scheduler selected from, per request.",
+			"Highest prefix-cache prediction among the endpoints the scheduler selected from, per request. "+modalityLabelHelp,
 			compbasemetrics.ALPHA),
 		Buckets: metricsutil.TokenCountBuckets,
 	},
-	[]string{"plugin_name", "plugin_type", "endpoint_role"},
+	[]string{"plugin_name", "plugin_type", "endpoint_role", "modality"},
 )
 
 var bestAvailableCachedTokens = prometheus.NewHistogramVec(
@@ -66,11 +68,11 @@ var bestAvailableCachedTokens = prometheus.NewHistogramVec(
 		Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
 		Name:      "prefix_best_available_cached_tokens",
 		Help: metricsutil.HelpMsgWithStability(
-			"Highest prefix-cache prediction among the request's candidate endpoints before filtering, per request.",
+			"Highest prefix-cache prediction among the request's candidate endpoints before filtering, per request. "+modalityLabelHelp,
 			compbasemetrics.ALPHA),
 		Buckets: metricsutil.TokenCountBuckets,
 	},
-	[]string{"plugin_name", "plugin_type", "endpoint_role"},
+	[]string{"plugin_name", "plugin_type", "endpoint_role", "modality"},
 )
 
 var promptTokens = prometheus.NewHistogramVec(
@@ -117,16 +119,17 @@ type Prediction struct {
 	PromptTokens int
 }
 
-// RecordPrediction records a request's prefix-cache prediction under role.
-// Every field is observed in one call so each histogram covers the same
-// requests, which is what lets their sums be divided by one another.
+// RecordPrediction records a request's prefix-cache prediction under role, and
+// the two maxima also under modality. Every field is observed in one call so
+// each histogram covers the same requests, which is what lets their sums be
+// divided by one another once modality is summed over.
 // llm_d_epp_request_input_tokens is not a usable denominator here: it is
 // recorded from the model server's response, so it omits requests that fail or
 // return no usage, which these metrics still count.
-func RecordPrediction(pluginName, pluginType, role string, p Prediction) {
+func RecordPrediction(pluginName, pluginType, role, modality string, p Prediction) {
 	predictedCachedTokens.WithLabelValues(pluginName, pluginType, role).Observe(float64(p.Selected))
-	bestPredictedCachedTokens.WithLabelValues(pluginName, pluginType, role).Observe(float64(p.BestPredicted))
-	bestAvailableCachedTokens.WithLabelValues(pluginName, pluginType, role).Observe(float64(p.BestAvailable))
+	bestPredictedCachedTokens.WithLabelValues(pluginName, pluginType, role, modality).Observe(float64(p.BestPredicted))
+	bestAvailableCachedTokens.WithLabelValues(pluginName, pluginType, role, modality).Observe(float64(p.BestAvailable))
 	promptTokens.WithLabelValues(pluginName, pluginType, role).Observe(float64(p.PromptTokens))
 }
 

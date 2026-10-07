@@ -300,6 +300,27 @@ func TestPreRequestBestFallsBackToSelected(t *testing.T) {
 	assert.Equal(t, selected, metricSum(t, bestAvailableMetric, name, prefixmetrics.RoleDecode))
 }
 
+// The two maxima carry the modalities the request holds, so the reuse routing
+// and filtering left behind can be split between multimodal and text-only
+// traffic.
+func TestPreRequestMaximaCarryModality(t *testing.T) {
+	disableMinBlockSizeClamp(t)
+
+	const name = "approx-best-modality"
+	p := producerForPrediction(t, name, 2)
+	endpoints, result := endpointAndResult()
+
+	body := tokenizedBody([]uint32{1, 2, 3, 4})
+	body.TokenizedRequest.Prompts[0].MultiModalFeatures = []fwkrh.MultiModalFeature{
+		{Modality: fwkrh.ModalityImage, Hash: "img"},
+	}
+	runPredictionWithBody(t, p, "mm", body, endpoints, result)
+
+	image := string(fwkrh.ModalityImage)
+	assert.Equal(t, image, metricModality(t, bestPredictedMetric, name))
+	assert.Equal(t, image, metricModality(t, bestAvailableMetric, name))
+}
+
 func namedEndpoint(name string) fwksched.Endpoint {
 	return fwksched.NewEndpoint(
 		&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: name, Namespace: "default"}},
@@ -389,4 +410,29 @@ func metricSum(t *testing.T, metricName, pluginName, role string) float64 {
 		}
 	}
 	return 0
+}
+
+// metricModality returns the modality label of the plugin's only series of a
+// shared prefix metric.
+func metricModality(t *testing.T, metricName, pluginName string) string {
+	t.Helper()
+	families, err := ctrlmetrics.Registry.Gather()
+	require.NoError(t, err)
+	var modalities []string
+	for _, family := range families {
+		if family.GetName() != metricName {
+			continue
+		}
+		for _, metric := range family.GetMetric() {
+			labels := map[string]string{}
+			for _, label := range metric.GetLabel() {
+				labels[label.GetName()] = label.GetValue()
+			}
+			if labels["plugin_name"] == pluginName {
+				modalities = append(modalities, labels["modality"])
+			}
+		}
+	}
+	require.Len(t, modalities, 1)
+	return modalities[0]
 }
