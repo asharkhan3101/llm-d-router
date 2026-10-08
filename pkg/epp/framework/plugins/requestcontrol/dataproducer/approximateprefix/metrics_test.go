@@ -300,6 +300,26 @@ func TestPreRequestBestFallsBackToSelected(t *testing.T) {
 	assert.Equal(t, selected, metricSum(t, bestAvailableMetric, name, prefixmetrics.RoleDecode))
 }
 
+// A profile handler that rebuilds the result from its targets alone, such as
+// the data-parallel one, leaves no scored candidates. The pre-filter maximum
+// falls back with the picker-side one, so a routing miss toward a warmer
+// candidate is not reported as reuse lost to filtering.
+func TestPreRequestBestAvailableFallsBackWithoutScoredCandidates(t *testing.T) {
+	disableMinBlockSizeClamp(t)
+
+	const name = "approx-best-available-no-scored"
+	p := producerForPrediction(t, name, 2)
+	cold, cached := namedEndpoint("cold"), namedEndpoint("cached")
+	pods := []fwksched.Endpoint{cold, cached}
+	tokens := []uint32{1, 2, 3, 4}
+
+	runPrediction(t, p, "seed", tokens, pods, resultWith(cached, cold, cached))
+	runPrediction(t, p, "targets-only", tokens, pods, resultWith(cold))
+
+	assert.Equal(t, float64(0), metricSum(t, bestPredictedMetric, name, prefixmetrics.RoleDecode))
+	assert.Equal(t, float64(0), metricSum(t, bestAvailableMetric, name, prefixmetrics.RoleDecode))
+}
+
 // The two maxima carry the modalities the request holds, so the reuse routing
 // and filtering left behind can be split between multimodal and text-only
 // traffic.

@@ -122,8 +122,9 @@ func (p *Producer) recordPrediction(request *scheduling.InferenceRequest, schedu
 
 	selected := predictedCachedTokens(info)
 	// A profile that reports no scored candidates leaves only the chosen
-	// endpoint to go on, so selected stands in. That keeps the histograms on
-	// the same requests, at the cost of reading as a perfect routing decision.
+	// endpoint to go on, so selected stands in for both maxima. That keeps the
+	// histograms on the same requests, at the cost of reading as a perfect
+	// routing decision.
 	bestPredicted := selected
 	for _, candidate := range profile.ScoredCandidates {
 		if candidateInfo, ok := p.matchInfo(candidate.Endpoint); ok {
@@ -132,9 +133,11 @@ func (p *Producer) recordPrediction(request *scheduling.InferenceRequest, schedu
 	}
 
 	bestAvailable := bestPredicted
-	if state, err := plugin.ReadPluginStateKey[*bestAvailableState](
-		p.pluginState, request.RequestID, bestAvailableStateKey); err == nil {
-		bestAvailable = max(bestAvailable, state.cachedTokens)
+	if len(profile.ScoredCandidates) > 0 {
+		if state, err := plugin.ReadPluginStateKey[*bestAvailableState](
+			p.pluginState, request.RequestID, bestAvailableStateKey); err == nil {
+			bestAvailable = max(bestAvailable, state.cachedTokens)
+		}
 	}
 
 	modality, _ := mmobs.Summary(request)

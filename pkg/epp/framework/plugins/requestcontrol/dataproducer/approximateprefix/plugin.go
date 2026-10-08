@@ -310,11 +310,20 @@ func (p *dataProducer) PreRequest(ctx context.Context, request *fwksched.Inferen
 	if request.Body != nil {
 		predictionProfile, role := prefixmetrics.PredictionTarget(schedulingResult, experimentalDefaultPrefillProfile)
 		selected := state.PredictedCachedTokens[ServerID(predictionProfile.TargetEndpoints[0].GetMetadata().ID)]
+		// A profile that reports no scored candidates leaves only the chosen
+		// endpoint to go on, so selected stands in for both maxima. That keeps
+		// the histograms on the same requests, at the cost of reading as a
+		// perfect routing decision.
+		bestPredicted, bestAvailable := selected, selected
+		if scored := predictionProfile.ScoredCandidates; len(scored) > 0 {
+			bestPredicted = bestAmongScored(scored, state.PredictedCachedTokens, selected)
+			bestAvailable = state.BestAvailableCachedTokens
+		}
 		modality, _ := mmobs.Summary(request)
 		prefixmetrics.RecordPrediction(p.typedName.Name, p.typedName.Type, role, modality, prefixmetrics.Prediction{
 			Selected:      selected,
-			BestPredicted: bestAmongScored(predictionProfile.ScoredCandidates, state.PredictedCachedTokens, selected),
-			BestAvailable: state.BestAvailableCachedTokens,
+			BestPredicted: bestPredicted,
+			BestAvailable: bestAvailable,
 			PromptTokens:  request.Body.TokenizedRequest.TokenCount(),
 		})
 	}
@@ -325,10 +334,6 @@ func (p *dataProducer) PreRequest(ctx context.Context, request *fwksched.Inferen
 // It walks the scored candidates rather than the prediction map: the map is
 // filled from the shared indexer, which reports every server holding a block,
 // including pods this request was never allowed to reach.
-//
-// A profile that reports no scored candidates leaves only the chosen endpoint
-// to go on, so selected stands in. That keeps the histograms on the same
-// requests, at the cost of reading as a perfect routing decision.
 func bestAmongScored(scored []fwksched.ScoredEndpoint, predicted map[ServerID]int, selected int) int {
 	best := selected
 	for _, candidate := range scored {

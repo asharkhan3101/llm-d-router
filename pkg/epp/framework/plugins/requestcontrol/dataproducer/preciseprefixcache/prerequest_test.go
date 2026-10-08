@@ -440,6 +440,55 @@ func TestProduceThenPreRequest_RecordsBothMaxima(t *testing.T) {
 		sharedPrefixHistogram(t, promptTokensMetric, name, prefixmetrics.RoleDecode).GetSampleSum())
 }
 
+// A profile handler that rebuilds the result from its targets alone, such as
+// the data-parallel one, leaves no scored candidates. Both maxima then fall
+// back to the chosen endpoint, so a routing miss toward a warmer candidate is
+// not reported as reuse lost to filtering.
+func TestProduceThenPreRequest_NoScoredCandidates_BothMaximaFallBack(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	prefixmetrics.Register()
+
+	const name = "precise-produce-no-scored"
+	const chosenBlocks, warmerBlocks, promptBlocks = 1, 6, 8
+
+	idx := &fakeKVCacheIndexer{
+		computeFromTokens: func(_ context.Context, _ []uint32, _ string, _ []*kvblock.BlockExtraFeatures) ([]kvblock.BlockHash, error) {
+			keys := make([]kvblock.BlockHash, promptBlocks)
+			for i := range keys {
+				keys[i] = kvblock.BlockHash(i + 1)
+			}
+			return keys, nil
+		},
+		matchBlockKeys: func(_ context.Context, _ []kvblock.BlockHash, _ sets.Set[string]) (map[string]kvcache.PodMatch, error) {
+			return map[string]kvcache.PodMatch{
+				"10.0.0.1:8080": {
+					WeightedScore: chosenBlocks, MatchedBlocks: chosenBlocks,
+					BlocksByTier: map[string]int{"gpu": chosenBlocks},
+				},
+				"10.0.0.2:8080": {
+					WeightedScore: warmerBlocks, MatchedBlocks: warmerBlocks,
+					BlocksByTier: map[string]int{"gpu": warmerBlocks},
+				},
+			}, nil
+		},
+	}
+	p := newProducerForProduceAndPreRequest(ctx, name, idx)
+
+	endpoints := freshEndpoints()
+	req := tokenizedRequest("req-produce-no-scored", promptBlocks*testBlockSize)
+	req.TargetModel = "test-model"
+	require.NoError(t, p.Produce(ctx, req, endpoints))
+	_ = p.PreRequest(ctx, req, primaryOnly("default", endpoints[0]))
+
+	selected := float64(chosenBlocks * testBlockSize)
+	assert.Equal(t, selected,
+		sharedPrefixHistogram(t, predictedCachedTokensMetric, name, prefixmetrics.RoleDecode).GetSampleSum())
+	assert.Equal(t, selected,
+		sharedPrefixHistogram(t, bestPredictedMetric, name, prefixmetrics.RoleDecode).GetSampleSum())
+	assert.Equal(t, selected,
+		sharedPrefixHistogram(t, bestAvailableMetric, name, prefixmetrics.RoleDecode).GetSampleSum())
+}
+
 // newProducerForProduceAndPreRequest builds a producer that can run both
 // extension points, so a prediction can be followed from the candidate match
 // through to the recorded metric.
