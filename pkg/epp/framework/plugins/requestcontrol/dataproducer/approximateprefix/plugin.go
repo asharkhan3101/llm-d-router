@@ -345,9 +345,9 @@ func (p *dataProducer) PreRequest(ctx context.Context, request *fwksched.Inferen
 }
 
 // bestAmongScored returns the highest prediction the picker could have chosen.
-// It walks the scored candidates rather than the prediction map: the map is
-// filled from the shared indexer, which reports every server holding a block,
-// including pods this request was never allowed to reach.
+// It walks the scored candidates rather than the prediction map, because the
+// map covers every candidate endpoint, including those the scheduler's filters
+// removed before the picker ran.
 func bestAmongScored(scored []fwksched.ScoredEndpoint, predicted map[ServerID]int, selected int) int {
 	best := selected
 	for _, candidate := range scored {

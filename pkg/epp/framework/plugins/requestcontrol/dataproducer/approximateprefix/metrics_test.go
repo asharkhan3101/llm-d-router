@@ -238,10 +238,8 @@ func TestPreRequestBestPredictedSpansScoredCandidates(t *testing.T) {
 		"the second request could have reached the cached pod")
 }
 
-// The prediction map is filled from the shared indexer, which reports every
-// server holding a block. A pod outside the request's candidates must not
-// count as a hit the router passed up, or routing looks wrong for declining a
-// pod it was never offered.
+// A pod that holds the prefix but is not among the request's candidates does
+// not raise either maximum, since the router was never offered it.
 func TestPreRequestBestIgnoresNonCandidateServers(t *testing.T) {
 	disableMinBlockSizeClamp(t)
 
