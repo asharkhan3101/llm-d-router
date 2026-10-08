@@ -63,6 +63,7 @@ func (f *fakeKVCacheIndexer) MatchBlockKeys(ctx context.Context, keys []kvblock.
 
 type fakeKVBlockIndex struct {
 	addFn   func(ctx context.Context, prevKeys, keys []kvblock.BlockHash, entries []kvblock.PodEntry) error
+	evictFn func(ctx context.Context, keyType kvblock.KeyType, keys []kvblock.BlockHash, entries []kvblock.PodEntry) error
 	clearFn func(ctx context.Context, podIdentifier string) error
 }
 
@@ -77,7 +78,10 @@ func (f *fakeKVBlockIndex) Add(ctx context.Context, prevKeys, keys []kvblock.Blo
 	return nil
 }
 
-func (f *fakeKVBlockIndex) Evict(_ context.Context, _ kvblock.BlockHash, _ kvblock.KeyType, _ []kvblock.PodEntry) error {
+func (f *fakeKVBlockIndex) Evict(ctx context.Context, keyType kvblock.KeyType, keys []kvblock.BlockHash, entries []kvblock.PodEntry) error {
+	if f.evictFn != nil {
+		return f.evictFn(ctx, keyType, keys, entries)
+	}
 	return nil
 }
 
@@ -956,7 +960,7 @@ type fakeSubscriberManager struct {
 
 func (f *fakeSubscriberManager) EnsureSubscriber(
 	_ context.Context,
-	id, sourceEndpoint, endpoint, _, _ string,
+	id, sourceEndpoint, endpoint, _, _, _ string,
 	_ bool,
 ) error {
 	f.ids = append(f.ids, id)

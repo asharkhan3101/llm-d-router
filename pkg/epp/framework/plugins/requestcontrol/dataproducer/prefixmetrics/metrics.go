@@ -144,10 +144,10 @@ func PredictionTarget(result *fwksched.SchedulingResult, prefillProfile string) 
 	if result == nil {
 		return nil, ""
 	}
-	if pr := result.ProfileResults[prefillProfile]; pr != nil && len(pr.TargetEndpoints) > 0 {
-		return pr, RolePrefill
+	if prefill := result.ProfileResults[prefillProfile]; prefill.FirstEndpoint() != nil {
+		return prefill, RolePrefill
 	}
-	if primary := result.ProfileResults[result.PrimaryProfileName]; primary != nil && len(primary.TargetEndpoints) > 0 {
+	if primary := result.ProfileResults[result.PrimaryProfileName]; primary.FirstEndpoint() != nil {
 		return primary, RoleDecode
 	}
 	return nil, ""
